@@ -1,0 +1,80 @@
+competition:
+  name: FIFA World Cup 2026
+  timezone: Asia/Shanghai
+  fixtures_file: data/fixtures.example.json
+
+run:
+  news_lookback_hours: 36
+  max_articles: 80
+  max_articles_per_agent: 35
+  output_dir: reports
+  request_timeout_seconds: 90
+
+news_sources:
+  - name: BBC Football
+    url: https://feeds.bbci.co.uk/sport/football/rss.xml
+  - name: ESPN Soccer
+    url: https://www.espn.com/espn/rss/soccer/news
+  - name: FIFA
+    url: https://inside.fifa.com/rss-feeds/news
+
+data_sources:
+  - id: local_match_intelligence
+    type: local_json
+    path: data/match_intelligence.example.json
+    enabled: true
+
+  # 实时数据服务需返回与 data/match_intelligence.example.json 相同的结构。
+  # 系统会附加 match_id、home_team、away_team、kickoff 查询参数。
+  # - id: realtime_football_data
+  #   type: http_json
+  #   url: https://your-data-service.example.com/match-intelligence
+  #   api_key_env: FOOTBALL_DATA_API_KEY
+  #   api_key_header: X-API-Key
+  #   api_key_prefix: ""
+  #   enabled: true
+
+providers:
+  - id: demo
+    type: mock
+    model: deterministic-demo
+    api_key_env: UNUSED
+    weight: 1.0
+
+  # OpenAI and many vendors expose an OpenAI-compatible API.
+  # - id: openai
+  #   type: openai_compatible
+  #   model: YOUR_MODEL_NAME
+  #   api_key_env: OPENAI_API_KEY
+  #   base_url: https://api.openai.com/v1
+  #   weight: 1.2
+
+  # - id: anthropic
+  #   type: anthropic
+  #   model: YOUR_MODEL_NAME
+  #   api_key_env: ANTHROPIC_API_KEY
+  #   weight: 1.0
+
+  # - id: gemini
+  #   type: gemini
+  #   model: YOUR_MODEL_NAME
+  #   api_key_env: GEMINI_API_KEY
+  #   weight: 1.0
+
+agents:
+  - id: form_and_squad
+    role: Analyze recent form, squad quality, injuries, suspensions, and player availability.
+    provider: demo
+    weight: 1.2
+  - id: tactics
+    role: Analyze tactical matchups, coaching, formations, depth, and tournament adaptability.
+    provider: demo
+    weight: 1.0
+  - id: evidence_skeptic
+    role: Challenge hype, flag weak or duplicated evidence, and produce conservative probabilities.
+    provider: demo
+    weight: 1.1
+  - id: tournament_model
+    role: Estimate match scores and title probabilities from the supplied evidence and fixtures.
+    provider: demo
+    weight: 1.3

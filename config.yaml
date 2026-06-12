@@ -1,0 +1,101 @@
+competition:
+  name: FIFA World Cup 2026
+  timezone: Asia/Shanghai
+  fixtures_file: data/fixtures.example.json
+
+run:
+  news_lookback_hours: 36
+  max_articles: 80
+  max_articles_per_agent: 35
+  output_dir: reports
+  request_timeout_seconds: 90
+
+news_sources:
+  - name: BBC Football
+    url: https://feeds.bbci.co.uk/sport/football/rss.xml
+  - name: ESPN Soccer
+    url: https://www.espn.com/espn/rss/soccer/news
+  - name: FIFA
+    url: https://inside.fifa.com/rss-feeds/news
+
+data_sources:
+  - id: local_match_intelligence
+    type: local_json
+    path: data/match_intelligence.example.json
+    enabled: false
+
+  # 启用真实数据服务后，系统会把结构化数据注入所有 Agent。
+  # - id: realtime_football_data
+  #   type: http_json
+  #   url: https://your-data-service.example.com/match-intelligence
+  #   api_key_env: FOOTBALL_DATA_API_KEY
+  #   api_key_header: X-API-Key
+  #   api_key_prefix: ""
+  #   enabled: true
+
+providers:
+#  - id: demo
+#    type: mock
+#    model: deterministic-demo
+#    api_key_env: UNUSED
+#    weight: 1.0
+#
+#  - id: deepseek
+#    type: openai_compatible
+#    model: deepseek-chat
+#    api_key_env: DEEPSEEK_API_KEY
+#    base_url: https://api.deepseek.com/v1
+#    weight: 1.0
+#
+#  - id: qwen
+#    type: openai_compatible
+#    model: 你的通义模型名称
+#    api_key_env: QWEN_API_KEY
+#    base_url: 厂商提供的兼容接口地址
+#    weight: 1.0
+#
+#  - id: moonshot
+#    type: openai_compatible
+#    model: 你的模型名称
+#    api_key_env: MOONSHOT_API_KEY
+#    base_url: 厂商提供的兼容接口地址
+#    weight: 1.0
+
+  # OpenAI and many vendors expose an OpenAI-compatible API.
+  # - id: openai
+  #   type: openai_compatible
+  #   model: YOUR_MODEL_NAME
+  #   api_key_env: OPENAI_API_KEY
+  #   base_url: https://api.openai.com/v1
+  #   weight: 1.2
+
+   - id: anthropic
+     type: anthropic
+     model: claude-haiku-4-5-20251001-thinking
+     api_key_env: ANTHROPIC_API_KEY
+     base_url: https://api.lmuai.com
+     weight: 1.0
+
+  # - id: gemini
+  #   type: gemini
+  #   model: YOUR_MODEL_NAME
+  #   api_key_env: GEMINI_API_KEY
+  #   weight: 1.0
+
+agents:
+  - id: form_and_squad
+    role: Analyze recent form, squad quality, injuries, suspensions, and player availability.
+    provider: anthropic
+    weight: 1.2
+  - id: tactics
+    role: Analyze tactical matchups, coaching, formations, depth, and tournament adaptability.
+    provider: anthropic
+    weight: 1.0
+  - id: evidence_skeptic
+    role: Challenge hype, flag weak or duplicated evidence, and produce conservative probabilities.
+    provider: anthropic
+    weight: 1.1
+  - id: tournament_model
+    role: Estimate match scores and title probabilities from the supplied evidence and fixtures.
+    provider: anthropic
+    weight: 1.3

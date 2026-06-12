@@ -1,0 +1,185 @@
+{
+  "matches": [
+    {
+      "match_id": "example-001",
+      "updated_at": "2026-06-12T07:30:00Z",
+      "sources": [
+        "DEMO: replace with licensed football data provider",
+        "DEMO: replace with weather and odds providers"
+      ],
+      "home_metrics": {
+        "team": "Mexico",
+        "fifa_rank": 15,
+        "elo_rating": 1822.0,
+        "recent_matches": [
+          {
+            "date": "2026-06-07T20:00:00Z",
+            "opponent": "Demo Team A",
+            "venue": "home",
+            "goals_for": 2,
+            "goals_against": 0,
+            "expected_goals_for": 1.8,
+            "expected_goals_against": 0.7,
+            "shots_for": 14,
+            "shots_against": 8
+          },
+          {
+            "date": "2026-06-02T20:00:00Z",
+            "opponent": "Demo Team B",
+            "venue": "away",
+            "goals_for": 1,
+            "goals_against": 1,
+            "expected_goals_for": 1.2,
+            "expected_goals_against": 1.1,
+            "shots_for": 11,
+            "shots_against": 10
+          }
+        ],
+        "recent_goals_for_per_game": 1.5,
+        "recent_goals_against_per_game": 0.5,
+        "recent_xg_for_per_game": 1.5,
+        "recent_xg_against_per_game": 0.9,
+        "home_or_away_win_rate": 0.62,
+        "clean_sheet_rate": 0.45,
+        "rest_days": 5
+      },
+      "away_metrics": {
+        "team": "South Africa",
+        "fifa_rank": 42,
+        "elo_rating": 1688.0,
+        "recent_matches": [
+          {
+            "date": "2026-06-08T18:00:00Z",
+            "opponent": "Demo Team C",
+            "venue": "away",
+            "goals_for": 1,
+            "goals_against": 0,
+            "expected_goals_for": 1.0,
+            "expected_goals_against": 0.8,
+            "shots_for": 9,
+            "shots_against": 9
+          },
+          {
+            "date": "2026-06-03T18:00:00Z",
+            "opponent": "Demo Team D",
+            "venue": "home",
+            "goals_for": 0,
+            "goals_against": 1,
+            "expected_goals_for": 0.9,
+            "expected_goals_against": 1.3,
+            "shots_for": 8,
+            "shots_against": 12
+          }
+        ],
+        "recent_goals_for_per_game": 0.5,
+        "recent_goals_against_per_game": 0.5,
+        "recent_xg_for_per_game": 0.95,
+        "recent_xg_against_per_game": 1.05,
+        "home_or_away_win_rate": 0.34,
+        "clean_sheet_rate": 0.4,
+        "rest_days": 4
+      },
+      "home_availability": {
+        "team": "Mexico",
+        "expected_lineup": [
+          "Mexico GK",
+          "Mexico RB",
+          "Mexico CB1",
+          "Mexico CB2",
+          "Mexico LB",
+          "Mexico CM1",
+          "Mexico CM2",
+          "Mexico RW",
+          "Mexico AM",
+          "Mexico LW",
+          "Mexico ST"
+        ],
+        "confirmed_lineup": [],
+        "players": [
+          {
+            "player": "Mexico Starter",
+            "status": "doubtful",
+            "reason": "Demo minor injury",
+            "importance": "starter"
+          }
+        ]
+      },
+      "away_availability": {
+        "team": "South Africa",
+        "expected_lineup": [
+          "South Africa GK",
+          "South Africa RB",
+          "South Africa CB1",
+          "South Africa CB2",
+          "South Africa LB",
+          "South Africa CM1",
+          "South Africa CM2",
+          "South Africa RW",
+          "South Africa AM",
+          "South Africa LW",
+          "South Africa ST"
+        ],
+        "confirmed_lineup": [],
+        "players": [
+          {
+            "player": "South Africa Rotation",
+            "status": "suspended",
+            "reason": "Demo suspension",
+            "importance": "rotation"
+          }
+        ]
+      },
+      "head_to_head": [
+        {
+          "date": "2010-06-11T14:00:00Z",
+          "home_team": "South Africa",
+          "away_team": "Mexico",
+          "home_goals": 1,
+          "away_goals": 1,
+          "competition": "World Cup"
+        }
+      ],
+      "odds": [
+        {
+          "captured_at": "2026-06-11T12:00:00Z",
+          "bookmaker": "Demo Market Average",
+          "home_decimal": 1.72,
+          "draw_decimal": 3.65,
+          "away_decimal": 5.1
+        },
+        {
+          "captured_at": "2026-06-12T07:00:00Z",
+          "bookmaker": "Demo Market Average",
+          "home_decimal": 1.68,
+          "draw_decimal": 3.7,
+          "away_decimal": 5.25
+        }
+      ],
+      "weather": {
+        "temperature_c": 26.0,
+        "humidity_percent": 61.0,
+        "precipitation_mm": 0.2,
+        "wind_kph": 13.0,
+        "condition": "Partly cloudy (demo)"
+      },
+      "venue": {
+        "stadium": "Demo Stadium",
+        "city": "Demo City",
+        "country": "United States",
+        "surface": "Natural grass",
+        "altitude_m": 180.0,
+        "capacity": 65000,
+        "neutral_venue": true
+      },
+      "travel": {
+        "home_distance_km": 2200.0,
+        "away_distance_km": 13500.0,
+        "home_timezone_shift_hours": 1.0,
+        "away_timezone_shift_hours": 7.0
+      },
+      "notes": [
+        "All values in this file are demonstration data, not live facts."
+      ]
+    }
+  ]
+}

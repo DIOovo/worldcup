@@ -1,0 +1,2 @@
+[console_scripts]
+world-cup-forecast = world_cup_forecast.cli:main

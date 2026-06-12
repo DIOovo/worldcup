@@ -1,0 +1,18 @@
+[
+  {
+    "match_id": "example-001",
+    "kickoff": "2026-06-12T20:00:00-05:00",
+    "stage": "Group stage",
+    "home_team": "Mexico",
+    "away_team": "South Africa",
+    "status": "scheduled"
+  },
+  {
+    "match_id": "example-002",
+    "kickoff": "2026-06-13T15:00:00-07:00",
+    "stage": "Group stage",
+    "home_team": "Brazil",
+    "away_team": "France",
+    "status": "scheduled"
+  }
+]

@@ -61,13 +61,13 @@ providers:
 #    base_url: 厂商提供的兼容接口地址
 #    weight: 1.0
 
-  # OpenAI and many vendors expose an OpenAI-compatible API.
-  # - id: openai
-  #   type: openai_compatible
-  #   model: YOUR_MODEL_NAME
-  #   api_key_env: OPENAI_API_KEY
-  #   base_url: https://api.openai.com/v1
-  #   weight: 1.2
+   OpenAI and many vendors expose an OpenAI-compatible API.
+   - id: openai
+     type: openai_compatible
+     model: G-5.4
+     api_key_env: sk-c27068245346fcb859c97266334ed7e59c89bfe46c14c3dbc2a295970a555499
+     base_url: https://api.lmuai.com/v1
+     weight: 1.0
 
    - id: anthropic
      type: anthropic

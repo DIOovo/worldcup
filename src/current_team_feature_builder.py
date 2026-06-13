@@ -36,6 +36,7 @@ from match_feature_engineering import (
     get_team_points,
     update_elo_ratings,
 )
+from world_cup_teams import normalize_team_name
 
 
 # ============================================================
@@ -55,37 +56,7 @@ HISTORICAL_DATA_FILE = (
 
 
 # ============================================================
-# 二、球队名称映射
-# ============================================================
-
-TEAM_NAME_ALIASES = {
-    "Czechia": "Czech Republic",
-    "Bosnia-Herzegovina": "Bosnia and Herzegovina",
-    "Congo DR": "DR Congo",
-    "Cape Verde Islands": "Cape Verde",
-    "Curacao": "Curaçao",
-}
-
-
-def normalize_team_name(team_name: str) -> str:
-    """
-    统一不同数据源中的球队名称。
-
-    例如：
-    football-data.org 使用 Czechia，
-    历史数据使用 Czech Republic。
-    """
-
-    cleaned_name = team_name.strip()
-
-    return TEAM_NAME_ALIASES.get(
-        cleaned_name,
-        cleaned_name,
-    )
-
-
-# ============================================================
-# 三、读取历史比赛
+# 二、读取历史比赛
 # ============================================================
 
 def load_finished_matches(

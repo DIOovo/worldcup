@@ -1,0 +1,41 @@
+{
+  "total_records": 20,
+  "successful_records": 20,
+  "failed_records": 0,
+  "accuracy": 0.5,
+  "log_loss": 0.918409,
+  "brier_score": 0.53817,
+  "actual_distribution": {
+    "HOME_WIN": 10,
+    "DRAW": 5,
+    "AWAY_WIN": 5
+  },
+  "predicted_distribution": {
+    "HOME_WIN": 16,
+    "AWAY_WIN": 3,
+    "DRAW": 1
+  },
+  "class_metrics": {
+    "HOME_WIN": {
+      "support": 10,
+      "predicted": 16,
+      "precision": 0.5625,
+      "recall": 0.9,
+      "f1": 0.692308
+    },
+    "DRAW": {
+      "support": 5,
+      "predicted": 1,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0
+    },
+    "AWAY_WIN": {
+      "support": 5,
+      "predicted": 3,
+      "precision": 0.333333,
+      "recall": 0.2,
+      "f1": 0.25
+    }
+  }
+}

@@ -1,21 +1,20 @@
 
 """
-大模型足球预测历史回测。
+大模型 + 泊松模型足球预测历史回测。
 
 功能：
 1. 读取无未来数据泄漏的历史比赛特征；
-2. 选择指定日期范围或最近若干场比赛；
-3. 将每场比赛的赛前特征发送给大模型；
-4. 保存主胜、平局、客胜概率；
-5. 保存预期进球与预测比分；
-6. 对比真实比赛结果和真实比分；
-7. 计算 Accuracy、Log Loss、Brier Score；
-8. 计算精确比分命中率和进球 MAE；
-9. 支持中断后继续执行。
-
-注意：
-每场比赛都会调用一次远程大模型 API，
-因此会产生时间和费用消耗。
+2. 只保留2026世界杯参赛球队之间的非友谊赛；
+3. 选择指定日期范围或最近若干场比赛；
+4. 将每场比赛的赛前特征发送给预测器；
+5. 保存主胜、平局、客胜概率；
+6. 保存预期进球、最可能比分和Top-N比分；
+7. 对比真实比赛结果和真实比分；
+8. 计算Accuracy、Log Loss、Brier Score；
+9. 计算精确比分命中率、Top-3/Top-5比分命中率；
+10. 计算进球MAE、大小球和双方进球指标；
+11. 支持中断后继续执行；
+12. 防止不同字段结构写入同一CSV。
 """
 
 from __future__ import annotations
@@ -30,6 +29,10 @@ import pandas as pd
 import requests
 
 from llm_match_predictor import LLMMatchPredictor
+from world_cup_teams import (
+    is_world_cup_2026_team,
+    normalize_team_name,
+)
 
 
 # ============================================================
@@ -44,7 +47,7 @@ FEATURE_FILE = (
     PROJECT_ROOT
     / "data"
     / "processed"
-    / "match_features_train.csv"
+    / "world_cup_2026_features_train.csv"
 )
 
 OUTPUT_DIR = (
@@ -53,8 +56,8 @@ OUTPUT_DIR = (
     / "backtest"
 )
 
-# 使用新版本名称，避免覆盖原来的 v3 回测结果
-BACKTEST_VERSION = "hybrid_poisson_v1_20"
+# 使用全新的版本名，避免读取之前列结构不一致的CSV
+BACKTEST_VERSION = "world_cup_hybrid_poisson_v3"
 
 BACKTEST_RESULT_FILE = (
     OUTPUT_DIR
@@ -71,32 +74,318 @@ BACKTEST_SUMMARY_FILE = (
 # 二、回测参数
 # ============================================================
 
-# 默认最多回测多少场
 DEFAULT_MATCH_LIMIT = 100
 
-# 两次 API 请求之间的暂停时间
 REQUEST_INTERVAL_SECONDS = 1.0
 
-# 单场比赛最多重试次数
 MAX_RETRIES = 3
 
-# 重试间隔
 RETRY_WAIT_SECONDS = 5
 
-# 计算 Log Loss 时防止 log(0)
 MIN_PROBABILITY = 1e-15
+
+ONLY_WORLD_CUP_TEAMS = True
+
+EXCLUDE_FRIENDLIES = True
 
 
 # ============================================================
-# 三、读取历史赛前特征
+# 三、回测特征必需字段
+# ============================================================
+
+BACKTEST_REQUIRED_COLUMNS = {
+    "date",
+    "home_team",
+    "away_team",
+    "home_score",
+    "away_score",
+    "tournament",
+    "neutral",
+    "target",
+    "result",
+
+    "home_elo",
+    "away_elo",
+    "elo_difference",
+
+    "home_matches_5",
+    "away_matches_5",
+    "home_matches_10",
+    "away_matches_10",
+
+    "home_win_rate_5",
+    "away_win_rate_5",
+    "home_win_rate_10",
+    "away_win_rate_10",
+
+    "home_draw_rate_5",
+    "away_draw_rate_5",
+    "home_draw_rate_10",
+    "away_draw_rate_10",
+
+    "home_loss_rate_5",
+    "away_loss_rate_5",
+    "home_loss_rate_10",
+    "away_loss_rate_10",
+
+    "home_avg_goals_for_5",
+    "away_avg_goals_for_5",
+    "home_avg_goals_for_10",
+    "away_avg_goals_for_10",
+
+    "home_avg_goals_against_5",
+    "away_avg_goals_against_5",
+    "home_avg_goals_against_10",
+    "away_avg_goals_against_10",
+
+    "home_avg_goal_difference_5",
+    "away_avg_goal_difference_5",
+    "home_avg_goal_difference_10",
+    "away_avg_goal_difference_10",
+
+    "home_avg_points_5",
+    "away_avg_points_5",
+    "home_avg_points_10",
+    "away_avg_points_10",
+
+    "home_clean_sheet_rate_5",
+    "away_clean_sheet_rate_5",
+    "home_clean_sheet_rate_10",
+    "away_clean_sheet_rate_10",
+
+    "home_scoring_rate_5",
+    "away_scoring_rate_5",
+    "home_scoring_rate_10",
+    "away_scoring_rate_10",
+
+    "home_rest_days",
+    "away_rest_days",
+    "rest_days_difference",
+
+    "h2h_matches",
+    "h2h_home_win_rate",
+    "h2h_draw_rate",
+    "h2h_away_win_rate",
+}
+
+
+# ============================================================
+# 四、统一回测结果列
+# ============================================================
+
+RESULT_COLUMNS = [
+    # 数据集和版本信息
+    "backtest_version",
+    "only_world_cup_teams",
+    "exclude_friendlies",
+    "dataset_file",
+
+    # 比赛基本信息
+    "date",
+    "home_team",
+    "away_team",
+    "tournament",
+    "neutral",
+
+    # 胜平负
+    "actual_result",
+    "predicted_result",
+    "home_win_probability",
+    "draw_probability",
+    "away_win_probability",
+    "correct",
+
+    # 真实比分
+    "actual_home_score",
+    "actual_away_score",
+    "actual_scoreline",
+
+    # 最可能比分
+    "predicted_home_score",
+    "predicted_away_score",
+    "predicted_scoreline",
+    "scoreline_probability",
+    "exact_score_correct",
+
+    # Top-N比分
+    "alternate_scorelines",
+    "top3_score_correct",
+    "top5_score_correct",
+
+    # 预期进球
+    "base_home_expected_goals",
+    "base_away_expected_goals",
+    "home_goal_adjustment",
+    "away_goal_adjustment",
+    "expected_home_goals",
+    "expected_away_goals",
+    "expected_total_goals",
+
+    # 附加概率
+    "over_2_5_probability",
+    "under_2_5_probability",
+    "both_teams_score_probability",
+
+    # 真实附加标签
+    "actual_over_2_5",
+    "actual_both_teams_score",
+
+    # 附加判断
+    "predicted_over_2_5",
+    "predicted_both_teams_score",
+    "over_2_5_correct",
+    "both_teams_score_correct",
+
+    # 模型说明
+    "confidence",
+    "adjustment_reasons",
+    "analysis",
+    "key_factors",
+    "model",
+
+    # 状态
+    "status",
+    "error",
+]
+
+
+# ============================================================
+# 五、通用工具函数
+# ============================================================
+
+def safe_float(
+    value: Any,
+    default: float | None = None,
+) -> float | None:
+    """
+    将值转换为float。
+
+    转换失败时返回default。
+    """
+
+    if value is None:
+        return default
+
+    try:
+        return float(value)
+
+    except (TypeError, ValueError):
+        return default
+
+
+def safe_int(
+    value: Any,
+    default: int | None = None,
+) -> int | None:
+    """
+    将值转换为int。
+
+    转换失败时返回default。
+    """
+
+    if value is None:
+        return default
+
+    try:
+        return int(value)
+
+    except (TypeError, ValueError):
+        return default
+
+
+def normalize_result_record(
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    根据RESULT_COLUMNS统一结果字段和字段顺序。
+
+    缺少的字段自动填写None。
+    多余字段不会写入CSV。
+    """
+
+    return {
+        column: result.get(column)
+        for column in RESULT_COLUMNS
+    }
+
+
+def parse_alternate_scorelines(
+    value: Any,
+) -> list[dict[str, Any]]:
+    """
+    将备选比分转换为列表。
+
+    兼容：
+    1. Python list；
+    2. JSON字符串；
+    3. 空值。
+    """
+
+    if isinstance(value, list):
+        return value
+
+    if isinstance(value, str):
+        text = value.strip()
+
+        if not text:
+            return []
+
+        try:
+            parsed = json.loads(text)
+
+        except json.JSONDecodeError:
+            return []
+
+        if isinstance(parsed, list):
+            return parsed
+
+    return []
+
+
+def get_scoreline_set(
+    alternate_scorelines: Any,
+    limit: int,
+) -> set[str]:
+    """
+    从备选比分中提取前limit个比分字符串。
+    """
+
+    items = parse_alternate_scorelines(
+        alternate_scorelines
+    )
+
+    scorelines: set[str] = set()
+
+    for item in items[:limit]:
+        if not isinstance(item, dict):
+            continue
+
+        scoreline = str(
+            item.get(
+                "scoreline",
+                "",
+            )
+        ).strip()
+
+        if scoreline:
+            scorelines.add(scoreline)
+
+    return scorelines
+
+
+# ============================================================
+# 六、读取历史赛前特征
 # ============================================================
 
 def load_historical_features() -> pd.DataFrame:
     """
-    读取历史比赛赛前特征。
+    读取世界杯专用比赛赛前特征。
 
-    match_features_train.csv 中的每一行，
-    都是在对应比赛开始之前生成的特征。
+    筛选规则：
+    1. 双方均为2026世界杯参赛球队；
+    2. 排除Friendly；
+    3. 必需字段完整；
+    4. target和result必须与比分一致。
     """
 
     if not FEATURE_FILE.exists():
@@ -104,7 +393,69 @@ def load_historical_features() -> pd.DataFrame:
             f"没有找到历史特征文件：{FEATURE_FILE}"
         )
 
-    data = pd.read_csv(FEATURE_FILE)
+    data = pd.read_csv(
+        FEATURE_FILE
+    )
+
+    original_count = len(data)
+
+    print(
+        f"世界杯特征文件原始数量："
+        f"{original_count}"
+    )
+
+    missing_columns = (
+        BACKTEST_REQUIRED_COLUMNS
+        - set(data.columns)
+    )
+
+    if missing_columns:
+        raise ValueError(
+            "回测特征文件缺少必要字段："
+            f"{sorted(missing_columns)}"
+        )
+
+    data = data.copy()
+
+    data["home_team"] = (
+        data["home_team"]
+        .astype(str)
+        .map(normalize_team_name)
+    )
+
+    data["away_team"] = (
+        data["away_team"]
+        .astype(str)
+        .map(normalize_team_name)
+    )
+
+    if ONLY_WORLD_CUP_TEAMS:
+        world_cup_mask = (
+            data["home_team"].map(
+                is_world_cup_2026_team
+            )
+            &
+            data["away_team"].map(
+                is_world_cup_2026_team
+            )
+        )
+
+        data = data[
+            world_cup_mask
+        ].copy()
+
+    if EXCLUDE_FRIENDLIES:
+        tournament_text = (
+            data["tournament"]
+            .astype(str)
+            .str.strip()
+            .str.casefold()
+        )
+
+        data = data[
+            tournament_text
+            != "friendly".casefold()
+        ].copy()
 
     data["date"] = pd.to_datetime(
         data["date"],
@@ -112,14 +463,9 @@ def load_historical_features() -> pd.DataFrame:
     )
 
     data = data.dropna(
-        subset=[
-            "date",
-            "home_team",
-            "away_team",
-            "home_score",
-            "away_score",
-            "target",
-        ]
+        subset=sorted(
+            BACKTEST_REQUIRED_COLUMNS
+        )
     ).copy()
 
     data["home_score"] = pd.to_numeric(
@@ -137,13 +483,89 @@ def load_historical_features() -> pd.DataFrame:
         errors="raise",
     ).astype(int)
 
+    expected_target = data.apply(
+        lambda row: (
+            2
+            if row["home_score"]
+            > row["away_score"]
+            else 0
+            if row["home_score"]
+            < row["away_score"]
+            else 1
+        ),
+        axis=1,
+    ).astype(int)
+
+    target_mismatch = (
+        data["target"]
+        != expected_target
+    )
+
+    if target_mismatch.any():
+        invalid_rows = data.loc[
+            target_mismatch,
+            [
+                "date",
+                "home_team",
+                "away_team",
+                "home_score",
+                "away_score",
+                "target",
+            ],
+        ]
+
+        raise ValueError(
+            "回测数据target与真实比分不一致：\n"
+            f"{invalid_rows.head(10)}"
+        )
+
+    expected_result = expected_target.map({
+        2: "HOME_WIN",
+        1: "DRAW",
+        0: "AWAY_WIN",
+    })
+
+    actual_result_text = (
+        data["result"]
+        .astype(str)
+        .str.strip()
+    )
+
+    result_mismatch = (
+        actual_result_text
+        != expected_result
+    )
+
+    if result_mismatch.any():
+        invalid_rows = data.loc[
+            result_mismatch,
+            [
+                "date",
+                "home_team",
+                "away_team",
+                "home_score",
+                "away_score",
+                "result",
+            ],
+        ]
+
+        raise ValueError(
+            "回测数据result与真实比分不一致：\n"
+            f"{invalid_rows.head(10)}"
+        )
+
+    print(
+        "世界杯球队、非友谊赛和完整字段"
+        f"筛选后数量：{len(data)}"
+    )
+
     return data.sort_values(
         "date"
     ).reset_index(drop=True)
 
 
 # ============================================================
-# 四、选择回测比赛
+# 七、选择回测比赛
 # ============================================================
 
 def select_backtest_matches(
@@ -153,17 +575,11 @@ def select_backtest_matches(
     match_limit: int | None = DEFAULT_MATCH_LIMIT,
 ) -> pd.DataFrame:
     """
-    根据日期范围和数量选择回测比赛。
+    根据日期范围和数量选择比赛。
 
-    start_date:
-        包含该日期，即 date >= start_date。
-
-    end_date:
-        不包含该日期，即 date < end_date。
-
-    match_limit:
-        最多选择最后多少场。
-        设置为 None 表示选择日期范围内全部比赛。
+    start_date包含该日期。
+    end_date不包含该日期。
+    match_limit表示最多选择最后多少场。
     """
 
     selected = data.copy()
@@ -181,7 +597,11 @@ def select_backtest_matches(
         ]
 
     selected = selected.sort_values(
-        "date"
+        [
+            "date",
+            "home_team",
+            "away_team",
+        ]
     )
 
     print(
@@ -194,11 +614,13 @@ def select_backtest_matches(
             match_limit
         )
 
-    return selected.reset_index(drop=True)
+    return selected.reset_index(
+        drop=True
+    )
 
 
 # ============================================================
-# 五、构造大模型输入特征
+# 八、构造预测输入
 # ============================================================
 
 def extract_team_features(
@@ -206,11 +628,18 @@ def extract_team_features(
     prefix: str,
 ) -> dict[str, Any]:
     """
-    从历史比赛的一行中提取一支球队的赛前特征。
+    提取主队或客队的赛前特征。
 
-    prefix:
-        home 或 away。
+    prefix必须是home或away。
     """
+
+    if prefix not in {
+        "home",
+        "away",
+    }:
+        raise ValueError(
+            f"未知球队前缀：{prefix}"
+        )
 
     return {
         "team": row[f"{prefix}_team"],
@@ -236,15 +665,21 @@ def extract_team_features(
         ),
 
         "avg_goals_for_5": float(
-            row[f"{prefix}_avg_goals_for_5"]
+            row[
+                f"{prefix}_avg_goals_for_5"
+            ]
         ),
 
         "avg_goals_against_5": float(
-            row[f"{prefix}_avg_goals_against_5"]
+            row[
+                f"{prefix}_avg_goals_against_5"
+            ]
         ),
 
         "avg_goal_difference_5": float(
-            row[f"{prefix}_avg_goal_difference_5"]
+            row[
+                f"{prefix}_avg_goal_difference_5"
+            ]
         ),
 
         "avg_points_5": float(
@@ -252,11 +687,15 @@ def extract_team_features(
         ),
 
         "clean_sheet_rate_5": float(
-            row[f"{prefix}_clean_sheet_rate_5"]
+            row[
+                f"{prefix}_clean_sheet_rate_5"
+            ]
         ),
 
         "scoring_rate_5": float(
-            row[f"{prefix}_scoring_rate_5"]
+            row[
+                f"{prefix}_scoring_rate_5"
+            ]
         ),
 
         "matches_10": int(
@@ -276,15 +715,21 @@ def extract_team_features(
         ),
 
         "avg_goals_for_10": float(
-            row[f"{prefix}_avg_goals_for_10"]
+            row[
+                f"{prefix}_avg_goals_for_10"
+            ]
         ),
 
         "avg_goals_against_10": float(
-            row[f"{prefix}_avg_goals_against_10"]
+            row[
+                f"{prefix}_avg_goals_against_10"
+            ]
         ),
 
         "avg_goal_difference_10": float(
-            row[f"{prefix}_avg_goal_difference_10"]
+            row[
+                f"{prefix}_avg_goal_difference_10"
+            ]
         ),
 
         "avg_points_10": float(
@@ -292,11 +737,15 @@ def extract_team_features(
         ),
 
         "clean_sheet_rate_10": float(
-            row[f"{prefix}_clean_sheet_rate_10"]
+            row[
+                f"{prefix}_clean_sheet_rate_10"
+            ]
         ),
 
         "scoring_rate_10": float(
-            row[f"{prefix}_scoring_rate_10"]
+            row[
+                f"{prefix}_scoring_rate_10"
+            ]
         ),
 
         "rest_days": int(
@@ -309,15 +758,9 @@ def build_historical_prediction_features(
     row: pd.Series,
 ) -> dict[str, Any]:
     """
-    将一场历史比赛转换为大模型预测输入。
+    将历史比赛行转换成预测输入。
 
-    不向模型发送：
-    - home_score；
-    - away_score；
-    - result；
-    - target。
-
-    因此大模型无法直接看到真实答案。
+    不向模型发送真实比分、result和target。
     """
 
     home_features = extract_team_features(
@@ -332,16 +775,25 @@ def build_historical_prediction_features(
 
     return {
         "prediction_date": (
-            row["date"].strftime("%Y-%m-%d")
+            row["date"].strftime(
+                "%Y-%m-%d"
+            )
         ),
 
         "home_team": row["home_team"],
         "away_team": row["away_team"],
         "tournament": row["tournament"],
-        "neutral": bool(row["neutral"]),
+        "neutral": bool(
+            row["neutral"]
+        ),
 
-        "home_team_features": home_features,
-        "away_team_features": away_features,
+        "home_team_features": (
+            home_features
+        ),
+
+        "away_team_features": (
+            away_features
+        ),
 
         "derived_features": {
             "elo_difference": float(
@@ -367,19 +819,29 @@ def build_historical_prediction_features(
             ),
 
             "avg_goals_for_5_difference": round(
-                home_features["avg_goals_for_5"]
-                - away_features["avg_goals_for_5"],
+                home_features[
+                    "avg_goals_for_5"
+                ]
+                - away_features[
+                    "avg_goals_for_5"
+                ],
                 6,
             ),
 
             "avg_goals_against_5_difference": round(
-                home_features["avg_goals_against_5"]
-                - away_features["avg_goals_against_5"],
+                home_features[
+                    "avg_goals_against_5"
+                ]
+                - away_features[
+                    "avg_goals_against_5"
+                ],
                 6,
             ),
 
             "rest_days_difference": int(
-                row["rest_days_difference"]
+                row[
+                    "rest_days_difference"
+                ]
             ),
 
             "h2h_matches": float(
@@ -399,24 +861,19 @@ def build_historical_prediction_features(
             ),
         },
 
-        # 当前历史回测暂时不添加历史天气
         "weather": None,
     }
 
 
 # ============================================================
-# 六、标签转换
+# 九、标签转换
 # ============================================================
 
 def target_to_result(
     target: int,
 ) -> str:
     """
-    将数字标签转换为文本。
-
-    2：主胜
-    1：平局
-    0：客胜
+    将数字标签转换为文本标签。
     """
 
     mapping = {
@@ -434,22 +891,57 @@ def target_to_result(
 
 
 # ============================================================
-# 七、断点续跑
+# 十、读取已有回测结果
 # ============================================================
 
 def load_existing_results() -> pd.DataFrame:
     """
-    读取已经保存的回测结果。
+    读取已有结果。
 
-    如果结果文件不存在，返回空 DataFrame。
+    CSV损坏时给出明确错误。
     """
 
     if not BACKTEST_RESULT_FILE.exists():
-        return pd.DataFrame()
+        return pd.DataFrame(
+            columns=RESULT_COLUMNS
+        )
 
-    return pd.read_csv(
-        BACKTEST_RESULT_FILE
-    )
+    try:
+        data = pd.read_csv(
+            BACKTEST_RESULT_FILE
+        )
+
+    except pd.errors.ParserError as error:
+        raise RuntimeError(
+            "现有回测CSV已经损坏或包含不同列结构。\n"
+            f"文件：{BACKTEST_RESULT_FILE}\n"
+            "请删除该文件，或者修改BACKTEST_VERSION。"
+        ) from error
+
+    missing_columns = [
+        column
+        for column in RESULT_COLUMNS
+        if column not in data.columns
+    ]
+
+    extra_columns = [
+        column
+        for column in data.columns
+        if column not in RESULT_COLUMNS
+    ]
+
+    if missing_columns or extra_columns:
+        raise RuntimeError(
+            "现有回测CSV字段与当前代码不一致。\n"
+            f"文件：{BACKTEST_RESULT_FILE}\n"
+            f"缺少字段：{missing_columns}\n"
+            f"多余字段：{extra_columns}\n"
+            "请删除该结果文件，或更换BACKTEST_VERSION。"
+        )
+
+    return data[
+        RESULT_COLUMNS
+    ].copy()
 
 
 def build_match_key(
@@ -458,13 +950,13 @@ def build_match_key(
     away_team: str,
 ) -> str:
     """
-    生成比赛唯一标识。
+    生成比赛唯一键。
     """
 
     return (
-        f"{date_text}|"
-        f"{home_team}|"
-        f"{away_team}"
+        f"{str(date_text).strip()}|"
+        f"{str(home_team).strip()}|"
+        f"{str(away_team).strip()}"
     )
 
 
@@ -478,18 +970,6 @@ def get_completed_match_keys(
     if existing_results.empty:
         return set()
 
-    required_columns = {
-        "date",
-        "home_team",
-        "away_team",
-        "status",
-    }
-
-    if not required_columns.issubset(
-        existing_results.columns
-    ):
-        return set()
-
     successful = existing_results[
         existing_results["status"]
         == "SUCCESS"
@@ -497,16 +977,16 @@ def get_completed_match_keys(
 
     return {
         build_match_key(
-            date_text=str(row["date"]),
-            home_team=str(row["home_team"]),
-            away_team=str(row["away_team"]),
+            date_text=row["date"],
+            home_team=row["home_team"],
+            away_team=row["away_team"],
         )
         for _, row in successful.iterrows()
     }
 
 
 # ============================================================
-# 八、调用大模型并重试
+# 十一、调用预测器并重试
 # ============================================================
 
 def predict_with_retry(
@@ -514,9 +994,7 @@ def predict_with_retry(
     features: dict[str, Any],
 ) -> dict[str, Any]:
     """
-    调用大模型。
-
-    网络异常、JSON 异常或供应商异常时自动重试。
+    调用预测器，失败后重试。
     """
 
     last_error: Exception | None = None
@@ -545,7 +1023,8 @@ def predict_with_retry(
 
             if attempt < MAX_RETRIES:
                 print(
-                    f"{RETRY_WAIT_SECONDS} 秒后重试……"
+                    f"{RETRY_WAIT_SECONDS} "
+                    "秒后重试……"
                 )
 
                 time.sleep(
@@ -553,12 +1032,13 @@ def predict_with_retry(
                 )
 
     raise RuntimeError(
-        f"达到最大重试次数：{last_error}"
+        f"达到最大重试次数："
+        f"{last_error}"
     )
 
 
 # ============================================================
-# 九、单场结果整理
+# 十二、构造成功结果
 # ============================================================
 
 def build_success_result(
@@ -566,7 +1046,7 @@ def build_success_result(
     prediction: dict[str, Any],
 ) -> dict[str, Any]:
     """
-    整理一场成功预测的回测结果。
+    整理一场成功预测的结果。
     """
 
     actual_home_score = int(
@@ -577,62 +1057,168 @@ def build_success_result(
         row["away_score"]
     )
 
-    predicted_home_score = int(
-        prediction.get(
-            "predicted_home_score",
-            0,
-        )
+    actual_scoreline = (
+        f"{actual_home_score}-"
+        f"{actual_away_score}"
     )
 
-    predicted_away_score = int(
+    predicted_home_score = safe_int(
         prediction.get(
-            "predicted_away_score",
-            0,
-        )
+            "predicted_home_score"
+        ),
+        default=0,
     )
 
-    actual_target = int(
-        row["target"]
+    predicted_away_score = safe_int(
+        prediction.get(
+            "predicted_away_score"
+        ),
+        default=0,
+    )
+
+    if predicted_home_score is None:
+        predicted_home_score = 0
+
+    if predicted_away_score is None:
+        predicted_away_score = 0
+
+    predicted_scoreline = (
+        f"{predicted_home_score}-"
+        f"{predicted_away_score}"
     )
 
     actual_result = target_to_result(
-        actual_target
+        int(row["target"])
     )
 
     predicted_result = str(
-        prediction["predicted_result"]
+        prediction.get(
+            "predicted_result",
+            "",
+        )
+    ).strip()
+
+    alternate_scorelines = (
+        prediction.get(
+            "alternate_scorelines",
+            [],
+        )
     )
 
-    return {
-        "date": (
-            row["date"].strftime("%Y-%m-%d")
+    top3_scores = get_scoreline_set(
+        alternate_scorelines,
+        limit=3,
+    )
+
+    top5_scores = get_scoreline_set(
+        alternate_scorelines,
+        limit=5,
+    )
+
+    actual_total_goals = (
+        actual_home_score
+        + actual_away_score
+    )
+
+    actual_over_2_5 = int(
+        actual_total_goals >= 3
+    )
+
+    actual_both_teams_score = int(
+        actual_home_score > 0
+        and actual_away_score > 0
+    )
+
+    over_2_5_probability = safe_float(
+        prediction.get(
+            "over_2_5_probability"
+        ),
+        default=0.0,
+    )
+
+    both_teams_score_probability = safe_float(
+        prediction.get(
+            "both_teams_score_probability"
+        ),
+        default=0.0,
+    )
+
+    if over_2_5_probability is None:
+        over_2_5_probability = 0.0
+
+    if both_teams_score_probability is None:
+        both_teams_score_probability = 0.0
+
+    predicted_over_2_5 = int(
+        over_2_5_probability >= 0.5
+    )
+
+    predicted_both_teams_score = int(
+        both_teams_score_probability >= 0.5
+    )
+
+    result = {
+        "backtest_version": (
+            BACKTEST_VERSION
         ),
 
-        "home_team": row["home_team"],
-        "away_team": row["away_team"],
-        "tournament": row["tournament"],
-        "neutral": int(row["neutral"]),
+        "only_world_cup_teams": (
+            ONLY_WORLD_CUP_TEAMS
+        ),
 
-        # 胜平负结果
+        "exclude_friendlies": (
+            EXCLUDE_FRIENDLIES
+        ),
+
+        "dataset_file": str(
+            FEATURE_FILE
+        ),
+
+        "date": row[
+            "date"
+        ].strftime("%Y-%m-%d"),
+
+        "home_team": row[
+            "home_team"
+        ],
+
+        "away_team": row[
+            "away_team"
+        ],
+
+        "tournament": row[
+            "tournament"
+        ],
+
+        "neutral": int(
+            row["neutral"]
+        ),
+
         "actual_result": actual_result,
-        "predicted_result": predicted_result,
 
-        "home_win_probability": float(
-            prediction[
+        "predicted_result": (
+            predicted_result
+        ),
+
+        "home_win_probability": safe_float(
+            prediction.get(
                 "home_win_probability"
-            ]
+            ),
+            default=0.0,
         ),
 
-        "draw_probability": float(
-            prediction[
+        "draw_probability": safe_float(
+            prediction.get(
                 "draw_probability"
-            ]
+            ),
+            default=0.0,
         ),
 
-        "away_win_probability": float(
-            prediction[
+        "away_win_probability": safe_float(
+            prediction.get(
                 "away_win_probability"
-            ]
+            ),
+            default=0.0,
         ),
 
         "correct": int(
@@ -640,16 +1226,18 @@ def build_success_result(
             == predicted_result
         ),
 
-        # 真实比分
-        "actual_home_score": actual_home_score,
-        "actual_away_score": actual_away_score,
-
-        "actual_scoreline": (
-            f"{actual_home_score}-"
-            f"{actual_away_score}"
+        "actual_home_score": (
+            actual_home_score
         ),
 
-        # 预测比分
+        "actual_away_score": (
+            actual_away_score
+        ),
+
+        "actual_scoreline": (
+            actual_scoreline
+        ),
+
         "predicted_home_score": (
             predicted_home_score
         ),
@@ -659,48 +1247,141 @@ def build_success_result(
         ),
 
         "predicted_scoreline": (
-            f"{predicted_home_score}-"
-            f"{predicted_away_score}"
+            predicted_scoreline
         ),
 
-        # 大模型给出的预期进球
-        "expected_home_goals": float(
+        "scoreline_probability": safe_float(
             prediction.get(
-                "expected_home_goals",
-                0.0,
-            )
+                "scoreline_probability"
+            ),
+            default=0.0,
         ),
 
-        "expected_away_goals": float(
-            prediction.get(
-                "expected_away_goals",
-                0.0,
-            )
-        ),
-
-        "expected_total_goals": float(
-            prediction.get(
-                "expected_total_goals",
-                0.0,
-            )
-        ),
-
-        # 是否精确命中比分
         "exact_score_correct": int(
-            actual_home_score
-            == predicted_home_score
-            and
-            actual_away_score
-            == predicted_away_score
+            actual_scoreline
+            == predicted_scoreline
         ),
 
-        "confidence": prediction.get(
-            "confidence"
+        "alternate_scorelines": json.dumps(
+            alternate_scorelines,
+            ensure_ascii=False,
         ),
 
-        "analysis": prediction.get(
-            "analysis",
-            "",
+        "top3_score_correct": int(
+            actual_scoreline
+            in top3_scores
+        ),
+
+        "top5_score_correct": int(
+            actual_scoreline
+            in top5_scores
+        ),
+
+        "base_home_expected_goals": safe_float(
+            prediction.get(
+                "base_home_expected_goals"
+            )
+        ),
+
+        "base_away_expected_goals": safe_float(
+            prediction.get(
+                "base_away_expected_goals"
+            )
+        ),
+
+        "home_goal_adjustment": safe_float(
+            prediction.get(
+                "home_goal_adjustment"
+            )
+        ),
+
+        "away_goal_adjustment": safe_float(
+            prediction.get(
+                "away_goal_adjustment"
+            )
+        ),
+
+        "expected_home_goals": safe_float(
+            prediction.get(
+                "expected_home_goals"
+            ),
+            default=0.0,
+        ),
+
+        "expected_away_goals": safe_float(
+            prediction.get(
+                "expected_away_goals"
+            ),
+            default=0.0,
+        ),
+
+        "expected_total_goals": safe_float(
+            prediction.get(
+                "expected_total_goals"
+            ),
+            default=0.0,
+        ),
+
+        "over_2_5_probability": (
+            over_2_5_probability
+        ),
+
+        "under_2_5_probability": safe_float(
+            prediction.get(
+                "under_2_5_probability"
+            ),
+            default=0.0,
+        ),
+
+        "both_teams_score_probability": (
+            both_teams_score_probability
+        ),
+
+        "actual_over_2_5": (
+            actual_over_2_5
+        ),
+
+        "actual_both_teams_score": (
+            actual_both_teams_score
+        ),
+
+        "predicted_over_2_5": (
+            predicted_over_2_5
+        ),
+
+        "predicted_both_teams_score": (
+            predicted_both_teams_score
+        ),
+
+        "over_2_5_correct": int(
+            actual_over_2_5
+            == predicted_over_2_5
+        ),
+
+        "both_teams_score_correct": int(
+            actual_both_teams_score
+            == predicted_both_teams_score
+        ),
+
+        "confidence": safe_float(
+            prediction.get(
+                "confidence"
+            )
+        ),
+
+        "adjustment_reasons": json.dumps(
+            prediction.get(
+                "adjustment_reasons",
+                [],
+            ),
+            ensure_ascii=False,
+        ),
+
+        "analysis": str(
+            prediction.get(
+                "analysis",
+                "",
+            )
         ),
 
         "key_factors": json.dumps(
@@ -711,28 +1392,32 @@ def build_success_result(
             ensure_ascii=False,
         ),
 
-        "alternate_scorelines": json.dumps(
-            prediction.get(
-                "alternate_scorelines",
-                [],
-            ),
-            ensure_ascii=False,
+        "model": prediction.get(
+            "model"
         ),
 
         "status": "SUCCESS",
+
         "error": "",
     }
 
+    return normalize_result_record(
+        result
+    )
+
+
+# ============================================================
+# 十三、构造失败结果
+# ============================================================
 
 def build_failure_result(
     row: pd.Series,
     error: Exception,
 ) -> dict[str, Any]:
     """
-    保存预测失败的比赛记录。
+    构造失败记录。
 
-    字段与成功记录保持一致，
-    防止 CSV 列结构不统一。
+    与成功记录使用完全相同的列结构。
     """
 
     actual_home_score = int(
@@ -743,15 +1428,47 @@ def build_failure_result(
         row["away_score"]
     )
 
-    return {
-        "date": (
-            row["date"].strftime("%Y-%m-%d")
+    actual_total_goals = (
+        actual_home_score
+        + actual_away_score
+    )
+
+    result = {
+        "backtest_version": (
+            BACKTEST_VERSION
         ),
 
-        "home_team": row["home_team"],
-        "away_team": row["away_team"],
-        "tournament": row["tournament"],
-        "neutral": int(row["neutral"]),
+        "only_world_cup_teams": (
+            ONLY_WORLD_CUP_TEAMS
+        ),
+
+        "exclude_friendlies": (
+            EXCLUDE_FRIENDLIES
+        ),
+
+        "dataset_file": str(
+            FEATURE_FILE
+        ),
+
+        "date": row[
+            "date"
+        ].strftime("%Y-%m-%d"),
+
+        "home_team": row[
+            "home_team"
+        ],
+
+        "away_team": row[
+            "away_team"
+        ],
+
+        "tournament": row[
+            "tournament"
+        ],
+
+        "neutral": int(
+            row["neutral"]
+        ),
 
         "actual_result": target_to_result(
             int(row["target"])
@@ -765,8 +1482,13 @@ def build_failure_result(
 
         "correct": 0,
 
-        "actual_home_score": actual_home_score,
-        "actual_away_score": actual_away_score,
+        "actual_home_score": (
+            actual_home_score
+        ),
+
+        "actual_away_score": (
+            actual_away_score
+        ),
 
         "actual_scoreline": (
             f"{actual_home_score}-"
@@ -775,35 +1497,68 @@ def build_failure_result(
 
         "predicted_home_score": None,
         "predicted_away_score": None,
-        "predicted_scoreline": "",
+        "predicted_scoreline": None,
+        "scoreline_probability": None,
+        "exact_score_correct": 0,
+
+        "alternate_scorelines": "[]",
+        "top3_score_correct": 0,
+        "top5_score_correct": 0,
+
+        "base_home_expected_goals": None,
+        "base_away_expected_goals": None,
+        "home_goal_adjustment": None,
+        "away_goal_adjustment": None,
 
         "expected_home_goals": None,
         "expected_away_goals": None,
         "expected_total_goals": None,
 
-        "exact_score_correct": 0,
+        "over_2_5_probability": None,
+        "under_2_5_probability": None,
+        "both_teams_score_probability": None,
+
+        "actual_over_2_5": int(
+            actual_total_goals >= 3
+        ),
+
+        "actual_both_teams_score": int(
+            actual_home_score > 0
+            and actual_away_score > 0
+        ),
+
+        "predicted_over_2_5": None,
+        "predicted_both_teams_score": None,
+        "over_2_5_correct": 0,
+        "both_teams_score_correct": 0,
 
         "confidence": None,
+        "adjustment_reasons": "[]",
         "analysis": "",
         "key_factors": "[]",
-        "alternate_scorelines": "[]",
+        "model": None,
 
         "status": "FAILED",
+
         "error": str(error),
     }
 
+    return normalize_result_record(
+        result
+    )
+
 
 # ============================================================
-# 十、保存回测进度
+# 十四、保存结果
 # ============================================================
 
 def append_result(
     result: dict[str, Any],
 ) -> None:
     """
-    每完成一场比赛，立即将结果追加到 CSV。
+    将单场结果安全追加到CSV。
 
-    这样程序中途停止后不会丢失之前结果。
+    所有记录都强制使用RESULT_COLUMNS顺序。
     """
 
     OUTPUT_DIR.mkdir(
@@ -811,9 +1566,41 @@ def append_result(
         exist_ok=True,
     )
 
-    result_frame = pd.DataFrame(
-        [result]
+    normalized_result = (
+        normalize_result_record(
+            result
+        )
     )
+
+    result_frame = pd.DataFrame(
+        [normalized_result],
+        columns=RESULT_COLUMNS,
+    )
+
+    if BACKTEST_RESULT_FILE.exists():
+        try:
+            existing_header = list(
+                pd.read_csv(
+                    BACKTEST_RESULT_FILE,
+                    nrows=0,
+                ).columns
+            )
+
+        except pd.errors.ParserError as error:
+            raise RuntimeError(
+                "现有回测CSV已经损坏：\n"
+                f"{BACKTEST_RESULT_FILE}\n"
+                "请删除该文件或更换BACKTEST_VERSION。"
+            ) from error
+
+        if existing_header != RESULT_COLUMNS:
+            raise RuntimeError(
+                "现有回测CSV列结构与当前代码不一致。\n"
+                f"文件：{BACKTEST_RESULT_FILE}\n"
+                f"已有列数：{len(existing_header)}\n"
+                f"当前列数：{len(RESULT_COLUMNS)}\n"
+                "请删除旧文件或更换BACKTEST_VERSION。"
+            )
 
     write_header = (
         not BACKTEST_RESULT_FILE.exists()
@@ -829,16 +1616,14 @@ def append_result(
 
 
 # ============================================================
-# 十一、概率评估指标
+# 十五、概率评估指标
 # ============================================================
 
 def calculate_log_loss(
     results: pd.DataFrame,
 ) -> float:
     """
-    计算三分类 Log Loss。
-
-    越低越好。
+    计算三分类Log Loss。
     """
 
     losses: list[float] = []
@@ -866,7 +1651,8 @@ def calculate_log_loss(
         probability = max(
             MIN_PROBABILITY,
             min(
-                1.0 - MIN_PROBABILITY,
+                1.0
+                - MIN_PROBABILITY,
                 float(probability),
             ),
         )
@@ -879,7 +1665,8 @@ def calculate_log_loss(
         return 0.0
 
     return float(
-        sum(losses) / len(losses)
+        sum(losses)
+        / len(losses)
     )
 
 
@@ -887,18 +1674,12 @@ def calculate_brier_score(
     results: pd.DataFrame,
 ) -> float:
     """
-    计算三分类 Brier Score。
-
-    越低越好。
+    计算三分类Brier Score。
     """
 
     scores: list[float] = []
 
     for _, row in results.iterrows():
-        actual_result = row[
-            "actual_result"
-        ]
-
         actual_vector = {
             "HOME_WIN": [
                 1.0,
@@ -917,7 +1698,9 @@ def calculate_brier_score(
                 0.0,
                 1.0,
             ],
-        }[actual_result]
+        }[
+            row["actual_result"]
+        ]
 
         predicted_vector = [
             float(
@@ -941,10 +1724,10 @@ def calculate_brier_score(
 
         score = sum(
             (
-                predicted_probability
+                predicted_value
                 - actual_value
             ) ** 2
-            for predicted_probability, actual_value
+            for predicted_value, actual_value
             in zip(
                 predicted_vector,
                 actual_vector,
@@ -957,12 +1740,13 @@ def calculate_brier_score(
         return 0.0
 
     return float(
-        sum(scores) / len(scores)
+        sum(scores)
+        / len(scores)
     )
 
 
 # ============================================================
-# 十二、分类指标
+# 十六、分类指标
 # ============================================================
 
 def calculate_class_metrics(
@@ -970,7 +1754,7 @@ def calculate_class_metrics(
     class_name: str,
 ) -> dict[str, float | int]:
     """
-    计算某个类别的 Precision、Recall 和 F1。
+    计算Precision、Recall和F1。
     """
 
     actual_positive = (
@@ -1029,8 +1813,13 @@ def calculate_class_metrics(
     )
 
     f1 = (
-        2 * precision * recall
-        / (precision + recall)
+        2
+        * precision
+        * recall
+        / (
+            precision
+            + recall
+        )
         if precision + recall
         else 0.0
     )
@@ -1062,7 +1851,7 @@ def calculate_class_metrics(
 
 
 # ============================================================
-# 十三、比分评估指标
+# 十七、比分评估指标
 # ============================================================
 
 def calculate_score_metrics(
@@ -1070,29 +1859,32 @@ def calculate_score_metrics(
 ) -> dict[str, float]:
     """
     计算比分预测指标。
-
-    exact_score_accuracy:
-        精确比分命中率。
-
-    home_goal_mae:
-        主队预期进球与真实进球的平均绝对误差。
-
-    away_goal_mae:
-        客队预期进球与真实进球的平均绝对误差。
-
-    total_goal_mae:
-        预期总进球与真实总进球的平均绝对误差。
-
-    integer_score_home_mae:
-        预测整数主队比分的平均绝对误差。
-
-    integer_score_away_mae:
-        预测整数客队比分的平均绝对误差。
     """
+
+    actual_total_goals = (
+        successful[
+            "actual_home_score"
+        ]
+        + successful[
+            "actual_away_score"
+        ]
+    )
 
     exact_score_accuracy = float(
         successful[
             "exact_score_correct"
+        ].mean()
+    )
+
+    top3_score_accuracy = float(
+        successful[
+            "top3_score_correct"
+        ].mean()
+    )
+
+    top5_score_accuracy = float(
+        successful[
+            "top5_score_correct"
         ].mean()
     )
 
@@ -1120,15 +1912,6 @@ def calculate_score_metrics(
         )
         .abs()
         .mean()
-    )
-
-    actual_total_goals = (
-        successful[
-            "actual_home_score"
-        ]
-        + successful[
-            "actual_away_score"
-        ]
     )
 
     total_goal_mae = float(
@@ -1168,9 +1951,31 @@ def calculate_score_metrics(
         .mean()
     )
 
+    over_2_5_accuracy = float(
+        successful[
+            "over_2_5_correct"
+        ].mean()
+    )
+
+    both_teams_score_accuracy = float(
+        successful[
+            "both_teams_score_correct"
+        ].mean()
+    )
+
     return {
         "exact_score_accuracy": round(
             exact_score_accuracy,
+            6,
+        ),
+
+        "top3_score_accuracy": round(
+            top3_score_accuracy,
+            6,
+        ),
+
+        "top5_score_accuracy": round(
+            top5_score_accuracy,
             6,
         ),
 
@@ -1198,18 +2003,28 @@ def calculate_score_metrics(
             integer_score_away_mae,
             6,
         ),
+
+        "over_2_5_accuracy": round(
+            over_2_5_accuracy,
+            6,
+        ),
+
+        "both_teams_score_accuracy": round(
+            both_teams_score_accuracy,
+            6,
+        ),
     }
 
 
 # ============================================================
-# 十四、汇总评估
+# 十八、汇总指标
 # ============================================================
 
 def evaluate_results(
     results: pd.DataFrame,
 ) -> dict[str, Any]:
     """
-    计算完整回测指标。
+    计算全部回测指标。
     """
 
     successful = results[
@@ -1234,6 +2049,10 @@ def evaluate_results(
         "expected_away_goals",
         "expected_total_goals",
         "exact_score_correct",
+        "top3_score_correct",
+        "top5_score_correct",
+        "over_2_5_correct",
+        "both_teams_score_correct",
         "correct",
     ]
 
@@ -1244,28 +2063,48 @@ def evaluate_results(
         )
 
     accuracy = float(
-        successful["correct"].mean()
+        successful[
+            "correct"
+        ].mean()
     )
 
     actual_distribution = (
-        successful["actual_result"]
+        successful[
+            "actual_result"
+        ]
         .value_counts()
         .to_dict()
     )
 
     predicted_distribution = (
-        successful["predicted_result"]
+        successful[
+            "predicted_result"
+        ]
         .value_counts()
         .to_dict()
     )
 
-    score_metrics = calculate_score_metrics(
-        successful
+    score_metrics = (
+        calculate_score_metrics(
+            successful
+        )
     )
 
-    summary = {
+    return {
         "backtest_version": (
             BACKTEST_VERSION
+        ),
+
+        "only_world_cup_teams": (
+            ONLY_WORLD_CUP_TEAMS
+        ),
+
+        "exclude_friendlies": (
+            EXCLUDE_FRIENDLIES
+        ),
+
+        "dataset_file": str(
+            FEATURE_FILE
         ),
 
         "total_records": int(
@@ -1283,7 +2122,6 @@ def evaluate_results(
             ).sum()
         ),
 
-        # 胜平负指标
         "accuracy": round(
             accuracy,
             6,
@@ -1325,22 +2163,19 @@ def evaluate_results(
             ]
         },
 
-        # 比分指标
         **score_metrics,
     }
 
-    return summary
-
 
 # ============================================================
-# 十五、保存和打印汇总
+# 十九、保存与打印汇总
 # ============================================================
 
 def save_summary(
     summary: dict[str, Any],
 ) -> None:
     """
-    保存回测汇总结果。
+    保存汇总JSON。
     """
 
     OUTPUT_DIR.mkdir(
@@ -1364,82 +2199,134 @@ def print_summary(
     summary: dict[str, Any],
 ) -> None:
     """
-    打印完整回测指标。
+    打印回测结果。
     """
 
-    print("\n" + "=" * 70)
-    print("大模型历史回测结果")
-    print("=" * 70)
+    print("\n" + "=" * 72)
+    print("世界杯球队足球预测历史回测结果")
+    print("=" * 72)
 
     print(
         "回测版本：",
-        summary["backtest_version"],
+        summary[
+            "backtest_version"
+        ],
     )
 
     print(
         "总记录数：",
-        summary["total_records"],
+        summary[
+            "total_records"
+        ],
     )
 
     print(
         "成功预测：",
-        summary["successful_records"],
+        summary[
+            "successful_records"
+        ],
     )
 
     print(
         "失败预测：",
-        summary["failed_records"],
+        summary[
+            "failed_records"
+        ],
     )
 
     print("\n胜平负指标：")
 
     print(
         "准确率：",
-        f"{summary['accuracy'] * 100:.2f}%",
+        (
+            f"{summary['accuracy'] * 100:.2f}%"
+        ),
     )
 
     print(
         "Log Loss：",
-        summary["log_loss"],
+        summary[
+            "log_loss"
+        ],
     )
 
     print(
         "Brier Score：",
-        summary["brier_score"],
+        summary[
+            "brier_score"
+        ],
     )
 
     print("\n比分预测指标：")
 
     print(
-        "精确比分命中率：",
+        "Top-1精确比分命中率：",
         (
             f"{summary['exact_score_accuracy'] * 100:.2f}%"
         ),
     )
 
     print(
-        "主队预期进球 MAE：",
-        summary["home_goal_mae"],
+        "Top-3比分命中率：",
+        (
+            f"{summary['top3_score_accuracy'] * 100:.2f}%"
+        ),
     )
 
     print(
-        "客队预期进球 MAE：",
-        summary["away_goal_mae"],
+        "Top-5比分命中率：",
+        (
+            f"{summary['top5_score_accuracy'] * 100:.2f}%"
+        ),
     )
 
     print(
-        "总进球 MAE：",
-        summary["total_goal_mae"],
+        "主队预期进球MAE：",
+        summary[
+            "home_goal_mae"
+        ],
     )
 
     print(
-        "整数主队比分 MAE：",
-        summary["integer_score_home_mae"],
+        "客队预期进球MAE：",
+        summary[
+            "away_goal_mae"
+        ],
     )
 
     print(
-        "整数客队比分 MAE：",
-        summary["integer_score_away_mae"],
+        "总进球MAE：",
+        summary[
+            "total_goal_mae"
+        ],
+    )
+
+    print(
+        "整数主队比分MAE：",
+        summary[
+            "integer_score_home_mae"
+        ],
+    )
+
+    print(
+        "整数客队比分MAE：",
+        summary[
+            "integer_score_away_mae"
+        ],
+    )
+
+    print(
+        "大于2.5球判断准确率：",
+        (
+            f"{summary['over_2_5_accuracy'] * 100:.2f}%"
+        ),
+    )
+
+    print(
+        "双方都进球判断准确率：",
+        (
+            f"{summary['both_teams_score_accuracy'] * 100:.2f}%"
+        ),
     )
 
     print("\n实际结果分布：")
@@ -1461,18 +2348,20 @@ def print_summary(
     print("\n各类别指标：")
 
     for class_name, metrics in (
-        summary["class_metrics"].items()
+        summary[
+            "class_metrics"
+        ].items()
     ):
         print(
             class_name,
             metrics,
         )
 
-    print("=" * 70)
+    print("=" * 72)
 
 
 # ============================================================
-# 十六、回测主流程
+# 二十、回测主流程
 # ============================================================
 
 def run_backtest(
@@ -1481,17 +2370,19 @@ def run_backtest(
     match_limit: int | None = DEFAULT_MATCH_LIMIT,
 ) -> None:
     """
-    执行完整大模型历史回测。
+    执行完整回测。
     """
 
-    print("正在读取历史赛前特征……")
+    print(
+        "正在读取历史赛前特征……"
+    )
 
     feature_data = (
         load_historical_features()
     )
 
     print(
-        f"历史可训练比赛数量："
+        "历史可训练比赛数量："
         f"{len(feature_data)}"
     )
 
@@ -1503,13 +2394,23 @@ def run_backtest(
     )
 
     print(
-        f"本次计划回测比赛数量："
+        "本次计划回测比赛数量："
         f"{len(matches)}"
     )
 
     if matches.empty:
         raise ValueError(
             "没有找到符合条件的回测比赛"
+        )
+
+    print("\n本次回测比赛列表：")
+
+    for _, match in matches.iterrows():
+        print(
+            f"{match['date']:%Y-%m-%d} "
+            f"{match['home_team']} vs "
+            f"{match['away_team']} "
+            f"({match['tournament']})"
         )
 
     existing_results = (
@@ -1522,7 +2423,9 @@ def run_backtest(
         )
     )
 
-    predictor = LLMMatchPredictor()
+    predictor = (
+        LLMMatchPredictor()
+    )
 
     for index, row in matches.iterrows():
         date_text = row[
@@ -1531,18 +2434,14 @@ def run_backtest(
 
         match_key = build_match_key(
             date_text=date_text,
-            home_team=str(
-                row["home_team"]
-            ),
-            away_team=str(
-                row["away_team"]
-            ),
+            home_team=row["home_team"],
+            away_team=row["away_team"],
         )
 
         if match_key in completed_keys:
             print(
                 f"[{index + 1}/{len(matches)}] "
-                f"跳过已完成："
+                "跳过已完成："
                 f"{row['home_team']} "
                 f"vs {row['away_team']}"
             )
@@ -1553,8 +2452,7 @@ def run_backtest(
             f"\n[{index + 1}/{len(matches)}] "
             f"{date_text} "
             f"{row['home_team']} "
-            f"vs "
-            f"{row['away_team']}"
+            f"vs {row['away_team']}"
         )
 
         features = (
@@ -1564,41 +2462,78 @@ def run_backtest(
         )
 
         try:
-            prediction = predict_with_retry(
-                predictor=predictor,
-                features=features,
+            prediction = (
+                predict_with_retry(
+                    predictor=predictor,
+                    features=features,
+                )
             )
 
-            result = build_success_result(
-                row=row,
-                prediction=prediction,
+            result = (
+                build_success_result(
+                    row=row,
+                    prediction=prediction,
+                )
             )
 
             print(
                 "真实结果：",
-                result["actual_result"],
+                result[
+                    "actual_result"
+                ],
             )
 
             print(
                 "预测结果：",
-                result["predicted_result"],
+                result[
+                    "predicted_result"
+                ],
             )
 
             print(
                 "真实比分：",
-                result["actual_scoreline"],
+                result[
+                    "actual_scoreline"
+                ],
             )
 
             print(
-                "预测比分：",
-                result["predicted_scoreline"],
+                "最可能比分：",
+                result[
+                    "predicted_scoreline"
+                ],
             )
 
             print(
-                "精确比分命中：",
+                "该比分概率：",
+                result[
+                    "scoreline_probability"
+                ],
+            )
+
+            print(
+                "Top-1精确命中：",
                 bool(
                     result[
                         "exact_score_correct"
+                    ]
+                ),
+            )
+
+            print(
+                "Top-3命中：",
+                bool(
+                    result[
+                        "top3_score_correct"
+                    ]
+                ),
+            )
+
+            print(
+                "Top-5命中：",
+                bool(
+                    result[
+                        "top5_score_correct"
                     ]
                 ),
             )
@@ -1620,7 +2555,11 @@ def run_backtest(
 
             print(
                 "胜平负是否正确：",
-                bool(result["correct"]),
+                bool(
+                    result[
+                        "correct"
+                    ]
+                ),
             )
 
             print(
@@ -1644,18 +2583,24 @@ def run_backtest(
                 error,
             )
 
-            result = build_failure_result(
-                row=row,
-                error=error,
+            result = (
+                build_failure_result(
+                    row=row,
+                    error=error,
+                )
             )
 
-        append_result(result)
+        append_result(
+            result
+        )
 
         time.sleep(
             REQUEST_INTERVAL_SECONDS
         )
 
-    print("\n开始计算回测指标……")
+    print(
+        "\n开始计算回测指标……"
+    )
 
     all_results = (
         load_existing_results()
@@ -1668,30 +2613,32 @@ def run_backtest(
                     "%Y-%m-%d"
                 )
             ),
-            home_team=str(
-                row["home_team"]
-            ),
-            away_team=str(
-                row["away_team"]
-            ),
+            home_team=row[
+                "home_team"
+            ],
+            away_team=row[
+                "away_team"
+            ],
         )
         for _, row in matches.iterrows()
     }
 
     current_results = all_results[
         all_results.apply(
-            lambda result_row: build_match_key(
-                date_text=str(
-                    result_row["date"]
-                ),
-                home_team=str(
-                    result_row["home_team"]
-                ),
-                away_team=str(
-                    result_row["away_team"]
-                ),
-            )
-            in selected_keys,
+            lambda result_row: (
+                build_match_key(
+                    date_text=result_row[
+                        "date"
+                    ],
+                    home_team=result_row[
+                        "home_team"
+                    ],
+                    away_team=result_row[
+                        "away_team"
+                    ],
+                )
+                in selected_keys
+            ),
             axis=1,
         )
     ].copy()
@@ -1700,9 +2647,13 @@ def run_backtest(
         current_results
     )
 
-    save_summary(summary)
+    save_summary(
+        summary
+    )
 
-    print_summary(summary)
+    print_summary(
+        summary
+    )
 
     print(
         "\n逐场结果文件：",
@@ -1716,12 +2667,15 @@ def run_backtest(
 
 
 # ============================================================
-# 十七、程序入口
+# 二十一、程序入口
 # ============================================================
 
 def main() -> None:
     """
-    回测 2026-06-09 至 2026-06-12 的最后20场比赛。
+    回测当前已结束的2026世界杯比赛。
+
+    日期范围：
+    2026-06-09 <= date < 2026-06-13
     """
 
     run_backtest(
@@ -1733,4 +2687,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

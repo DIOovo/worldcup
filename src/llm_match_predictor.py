@@ -31,6 +31,7 @@ from current_team_feature_builder import (
 from scoreline_predictor import (
     predict_score_distribution,
 )
+from world_cup_teams import normalize_team_name
 
 
 # ============================================================
@@ -171,6 +172,9 @@ def build_prediction_features(
     """
     使用所有已结束比赛构造当前比赛特征。
     """
+
+    home_team = normalize_team_name(home_team)
+    away_team = normalize_team_name(away_team)
 
     home_features = (
         feature_builder.get_team_features(
@@ -1239,4 +1243,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

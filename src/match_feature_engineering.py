@@ -23,6 +23,12 @@ from typing import Any, Deque
 import numpy as np
 import pandas as pd
 
+from world_cup_teams import (
+    WORLD_CUP_2026_TEAMS,
+    is_world_cup_2026_team,
+    normalize_team_name,
+    validate_world_cup_team_count,
+)
 
 # ============================================================
 # 一、路径配置
@@ -55,6 +61,26 @@ TRAIN_FEATURE_FILE = (
     / "match_features_train.csv"
 )
 
+WORLD_CUP_FEATURE_FILE = (
+    OUTPUT_DIR
+    / "world_cup_2026_features_train.csv"
+)
+
+WORLD_CUP_TRAIN_FILE = (
+    OUTPUT_DIR
+    / "world_cup_2026_train.csv"
+)
+
+WORLD_CUP_VALIDATION_FILE = (
+    OUTPUT_DIR
+    / "world_cup_2026_validation.csv"
+)
+
+WORLD_CUP_TEST_FILE = (
+    OUTPUT_DIR
+    / "world_cup_2026_test.csv"
+)
+
 
 # ============================================================
 # 二、全局参数
@@ -67,6 +93,22 @@ MAX_HISTORY_SIZE = 20
 MAX_H2H_HISTORY_SIZE = 10
 
 MIN_HISTORY_MATCHES = 5
+
+TRAIN_END_DATE = "2024-01-01"
+
+VALIDATION_END_DATE = "2025-01-01"
+
+TOURNAMENT_WEIGHTS = {
+    "FIFA World Cup": 1.00,
+    "FIFA World Cup qualification": 0.85,
+    "UEFA Euro": 0.90,
+    "Copa América": 0.90,
+    "AFC Asian Cup": 0.85,
+    "African Cup of Nations": 0.85,
+    "CONCACAF Gold Cup": 0.80,
+    "UEFA Nations League": 0.75,
+    "Friendly": 0.35,
+}
 
 
 # ============================================================
@@ -163,6 +205,18 @@ def clean_matches(
 
     cleaned["away_score"] = (
         cleaned["away_score"].astype(int)
+    )
+
+    cleaned["home_team"] = (
+        cleaned["home_team"]
+        .astype(str)
+        .map(normalize_team_name)
+    )
+
+    cleaned["away_team"] = (
+        cleaned["away_team"]
+        .astype(str)
+        .map(normalize_team_name)
     )
 
     cleaned["neutral"] = (
@@ -488,6 +542,23 @@ def get_elo_k_factor(
         return 15.0
 
     return 20.0
+
+
+def get_tournament_weight(
+    tournament: str,
+) -> float:
+    """
+    Return the configured importance weight for a tournament.
+
+    The first version only exposes the value for future feature experiments.
+    Existing Elo calculations deliberately remain unchanged.
+    """
+
+    normalized = str(tournament).strip().casefold()
+    for name, weight in TOURNAMENT_WEIGHTS.items():
+        if normalized == name.casefold():
+            return weight
+    return 0.60
 
 
 def update_elo_ratings(
@@ -1030,6 +1101,163 @@ def filter_training_features(
     return filtered.reset_index(drop=True)
 
 
+def filter_world_cup_training_matches(
+    data: pd.DataFrame,
+    exclude_friendlies: bool = True,
+) -> pd.DataFrame:
+    """
+    Return matches played by two configured 2026 World Cup teams.
+
+    Team names are normalized after copying the input, so the caller's
+    DataFrame is never modified. Friendly target matches can be excluded
+    while still remaining available during the earlier state calculation.
+    """
+
+    required_columns = {
+        "home_team",
+        "away_team",
+        "tournament",
+    }
+    missing_columns = required_columns - set(data.columns)
+    if missing_columns:
+        raise ValueError(
+            "世界杯筛选缺少字段："
+            f"{sorted(missing_columns)}"
+        )
+
+    filtered = data.copy()
+    filtered["home_team"] = (
+        filtered["home_team"]
+        .astype(str)
+        .map(normalize_team_name)
+    )
+    filtered["away_team"] = (
+        filtered["away_team"]
+        .astype(str)
+        .map(normalize_team_name)
+    )
+
+    team_mask = (
+        filtered["home_team"].map(is_world_cup_2026_team)
+        & filtered["away_team"].map(is_world_cup_2026_team)
+    )
+    filtered = filtered[team_mask].copy()
+
+    if exclude_friendlies:
+        tournament_names = (
+            filtered["tournament"]
+            .astype(str)
+            .str.strip()
+            .str.casefold()
+        )
+        filtered = filtered[
+            tournament_names != "friendly".casefold()
+        ].copy()
+
+    return filtered.reset_index(drop=True)
+
+
+def split_dataset_by_date(
+    data: pd.DataFrame,
+    train_end_date: str,
+    validation_end_date: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Split a football dataset chronologically without random shuffling.
+
+    Training rows are before ``train_end_date``; validation rows begin at
+    that boundary and end before ``validation_end_date``; test rows begin
+    at the validation boundary.
+    """
+
+    if "date" not in data.columns:
+        raise ValueError("时间拆分缺少 date 字段")
+
+    dated = data.copy()
+    dated["date"] = pd.to_datetime(
+        dated["date"],
+        errors="coerce",
+    )
+    if dated["date"].isna().any():
+        raise ValueError("时间拆分发现无法解析的 date")
+
+    train_boundary = pd.Timestamp(train_end_date)
+    validation_boundary = pd.Timestamp(validation_end_date)
+    if train_boundary >= validation_boundary:
+        raise ValueError(
+            "train_end_date 必须早于 validation_end_date"
+        )
+
+    dated = dated.sort_values("date").reset_index(drop=True)
+    train = dated[
+        dated["date"] < train_boundary
+    ].copy()
+    validation = dated[
+        (dated["date"] >= train_boundary)
+        & (dated["date"] < validation_boundary)
+    ].copy()
+    test = dated[
+        dated["date"] >= validation_boundary
+    ].copy()
+
+    return (
+        train.reset_index(drop=True),
+        validation.reset_index(drop=True),
+        test.reset_index(drop=True),
+    )
+
+
+def _validate_world_cup_rows(data: pd.DataFrame) -> None:
+    """Raise if a supposedly World Cup-only dataset contains another team."""
+
+    teams = set(data["home_team"]) | set(data["away_team"])
+    unexpected = sorted(teams - WORLD_CUP_2026_TEAMS)
+    if unexpected:
+        raise ValueError(
+            "世界杯专用数据中发现非参赛球队："
+            f"{unexpected}"
+        )
+
+
+def _complete_training_rows(data: pd.DataFrame) -> pd.DataFrame:
+    """Keep rows with sufficient history and complete model fields."""
+
+    history_filtered = filter_training_features(data)
+    optional_columns = {"city", "country"}
+    required_columns = [
+        column
+        for column in history_filtered.columns
+        if column not in optional_columns
+    ]
+    return (
+        history_filtered
+        .dropna(subset=required_columns)
+        .reset_index(drop=True)
+    )
+
+
+def _print_dataset_summary(
+    name: str,
+    data: pd.DataFrame,
+) -> None:
+    """Print chronological split size, date range, labels, and team count."""
+
+    print(f"\n{name}：")
+    print(f"比赛数量：{len(data)}")
+    if data.empty:
+        print("最早日期：无")
+        print("最晚日期：无")
+    else:
+        print(f"最早日期：{data['date'].min().date()}")
+        print(f"最晚日期：{data['date'].max().date()}")
+    counts = data["target"].value_counts().to_dict()
+    print(f"主胜数量：{int(counts.get(2, 0))}")
+    print(f"平局数量：{int(counts.get(1, 0))}")
+    print(f"客胜数量：{int(counts.get(0, 0))}")
+    teams = set(data["home_team"]) | set(data["away_team"])
+    print(f"球队数量：{len(teams)}")
+
+
 # ============================================================
 # 十二、保存结果
 # ============================================================
@@ -1068,6 +1296,30 @@ def save_features(
     )
 
 
+def save_world_cup_features(
+    world_cup_features: pd.DataFrame,
+    train: pd.DataFrame,
+    validation: pd.DataFrame,
+    test: pd.DataFrame,
+) -> None:
+    """Save the World Cup-only full training pool and chronological splits."""
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    outputs = {
+        WORLD_CUP_FEATURE_FILE: world_cup_features,
+        WORLD_CUP_TRAIN_FILE: train,
+        WORLD_CUP_VALIDATION_FILE: validation,
+        WORLD_CUP_TEST_FILE: test,
+    }
+    for path, frame in outputs.items():
+        frame.to_csv(
+            path,
+            index=False,
+            encoding="utf-8-sig",
+        )
+        print(f"世界杯数据已保存：{path}")
+
+
 # ============================================================
 # 十三、主程序
 # ============================================================
@@ -1077,12 +1329,13 @@ def main() -> None:
     特征工程主流程。
     """
 
+    validate_world_cup_team_count()
     print("开始读取历史比赛数据……")
 
     raw_matches = load_matches()
 
     print(
-        f"原始数据数量：{len(raw_matches)}"
+        f"原始比赛数量：{len(raw_matches)}"
     )
 
     print("开始清洗比赛数据……")
@@ -1118,14 +1371,76 @@ def main() -> None:
         train_features=train_features
     )
 
-    print("\n训练标签分布：")
+    world_cup_all = filter_world_cup_training_matches(
+        full_features,
+        exclude_friendlies=False,
+    )
+    print(
+        "世界杯球队之间的比赛数量："
+        f"{len(world_cup_all)}"
+    )
+
+    world_cup_non_friendly = filter_world_cup_training_matches(
+        full_features,
+        exclude_friendlies=True,
+    )
+    print(
+        "排除友谊赛后的数量："
+        f"{len(world_cup_non_friendly)}"
+    )
+
+    world_cup_features = _complete_training_rows(
+        world_cup_non_friendly
+    )
+    _validate_world_cup_rows(world_cup_features)
+    print(
+        "世界杯专用训练样本数量："
+        f"{len(world_cup_features)}"
+    )
+    teams = (
+        set(world_cup_features["home_team"])
+        | set(world_cup_features["away_team"])
+    )
+    print(f"涉及的球队数量：{len(teams)}")
+    print(
+        "标签分布："
+        f"{world_cup_features['target'].value_counts().sort_index().to_dict()}"
+    )
+
+    train, validation, test = split_dataset_by_date(
+        world_cup_features,
+        train_end_date=TRAIN_END_DATE,
+        validation_end_date=VALIDATION_END_DATE,
+    )
+    _print_dataset_summary("训练集", train)
+    _print_dataset_summary("验证集", validation)
+    _print_dataset_summary("测试集", test)
+    save_world_cup_features(
+        world_cup_features,
+        train,
+        validation,
+        test,
+    )
+
+    print("\n输出文件路径：")
+    for output_path in (
+        FULL_FEATURE_FILE,
+        TRAIN_FEATURE_FILE,
+        WORLD_CUP_FEATURE_FILE,
+        WORLD_CUP_TRAIN_FILE,
+        WORLD_CUP_VALIDATION_FILE,
+        WORLD_CUP_TEST_FILE,
+    ):
+        print(output_path)
+
+    print("\n世界杯专用训练标签分布：")
 
     print(
-        train_features["result"]
+        world_cup_features["result"]
         .value_counts()
     )
 
-    print("\n最近5条训练数据：")
+    print("\n最近5条世界杯专用训练数据：")
 
     preview_columns = [
         "date",
@@ -1144,7 +1459,7 @@ def main() -> None:
     ]
 
     print(
-        train_features[
+        world_cup_features[
             preview_columns
         ]
         .tail(5)
